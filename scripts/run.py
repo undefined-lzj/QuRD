@@ -103,7 +103,6 @@ def scores(benchmark: str, fingerprints: list[str], budget: int = 10):
         batch_size=state["batch_size"],
         device=state["device"],
     )
-    print(1)
     runner.scores(
         {
             name: make_fingerprint(
@@ -113,6 +112,7 @@ def scores(benchmark: str, fingerprints: list[str], budget: int = 10):
         },
         budget=budget,
     )
+    info(f"Scores saved to {(state['generated_dir'] / 'scores.csv').resolve()}")
 
 
 @app.callback()

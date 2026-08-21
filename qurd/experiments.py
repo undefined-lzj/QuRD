@@ -1,4 +1,5 @@
 from pathlib import Path
+import csv
 import pickle
 from time import perf_counter
 from typing import Any, Callable, Iterable, TypeVar
@@ -13,6 +14,69 @@ from tqdm import tqdm
 
 from .benchmark.base import Benchmark
 from .fingerprint.base import OutputRepresentation, QueriesSampler
+
+
+SCORE_COLUMNS = [
+    "method",
+    "budget",
+    "source_model",
+    "target_model",
+    "score",
+    "dataset",
+]
+SCORE_KEY_COLUMNS = [
+    "dataset",
+    "method",
+    "budget",
+    "source_model",
+    "target_model",
+]
+
+
+class ScoresCsv:
+    """Persist model-pair scores to a deduplicated CSV file."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._records: dict[tuple[str, ...], dict[str, Any]] = {}
+
+        if path.is_file():
+            with path.open(newline="", encoding="utf-8") as file:
+                for record in csv.DictReader(file):
+                    normalized = self._normalize(record)
+                    self._records[self._key(normalized)] = normalized
+
+    def upsert(self, record: dict[str, Any]) -> None:
+        """Insert or replace one experiment result and flush it atomically."""
+        normalized = self._normalize(record)
+        self._records[self._key(normalized)] = normalized
+        self._flush()
+
+    @staticmethod
+    def _normalize(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "method": str(record["method"]),
+            "budget": int(record["budget"]),
+            "source_model": str(record["source_model"]),
+            "target_model": str(record["target_model"]),
+            "score": float(record["score"]),
+            "dataset": str(record["dataset"]),
+        }
+
+    @staticmethod
+    def _key(record: dict[str, Any]) -> tuple[str, ...]:
+        return tuple(str(record[column]) for column in SCORE_KEY_COLUMNS)
+
+    def _flush(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")
+
+        with temporary_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=SCORE_COLUMNS)
+            writer.writeheader()
+            writer.writerows(self._records.values())
+
+        temporary_path.replace(self.path)
 
 
 class Experiment:
@@ -144,6 +208,7 @@ class Experiment:
         """
 
         scores: list[dict[str, Any]] = []
+        scores_csv = ScoresCsv(self.dir / "scores.csv")
         models = {}
 
         for dataset_name in self.benchmark.base_models:
@@ -262,16 +327,18 @@ class Experiment:
                     # Compute the distance
                     score = distance(source_repr, target_repr)
 
-                    # Save the scores
-                    scores.append(
-                        dict(
-                            dataset=dataset_name,
-                            fingerprint=fingerprint,
-                            source=source_name,
-                            target=target_name,
-                            score=score,
-                        )
+                    # Persist each pair immediately so an interrupted experiment
+                    # keeps all results completed up to that point.
+                    record = dict(
+                        dataset=dataset_name,
+                        method=fingerprint,
+                        budget=budget,
+                        source_model=source_name,
+                        target_model=target_name,
+                        score=score,
                     )
+                    scores_csv.upsert(record)
+                    scores.append(record)
 
                     # Unload models from the GPU
                     source_model.cpu()

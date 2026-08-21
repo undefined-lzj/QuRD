@@ -18,24 +18,24 @@ GENERATED_DIR = Path("generated/")
 @app.command()
 def main():
     scores = pl.read_csv(GENERATED_DIR / "scores.csv").with_columns(
-        true_value=pl.col("source") == pl.col("target")
+        true_value=pl.col("source_model") == pl.col("target_model")
     )
     metrics = roc_metrics(
         scores,
-        ["dataset", "fingerprint", "source"],
+        ["dataset", "method", "budget", "source_model"],
         score=1 - pl.col("score"),
-        true_value=pl.col("source") == pl.col("target"),
+        true_value=pl.col("source_model") == pl.col("target_model"),
         fpr_threshold=0.05,
     )
     print(metrics)
 
     roc = roc_curve(
         scores,
-        ["dataset", "fingerprint", "source"],
+        ["dataset", "method", "budget", "source_model"],
         score=1 - pl.col("score"),
-        true_value=pl.col("source") == pl.col("target"),
+        true_value=pl.col("source_model") == pl.col("target_model"),
     )
 
     print(roc)
-    fig = px.histogram(scores, x="score", facet_row="fingerprint", color="true_value")
+    fig = px.histogram(scores, x="score", facet_row="method", color="true_value")
     fig.show()
