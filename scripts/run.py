@@ -82,12 +82,21 @@ def eval_models(benchmark: str):
         dir=state["generated_dir"],
         batch_size=state["batch_size"],
         device=state["device"],
+        seed=state["seed"],
     )
     runner.eval_models()
 
 
 @app.command()
-def scores(benchmark: str, fingerprints: list[str], budget: int = 10):
+def scores(
+    benchmark: str,
+    fingerprints: list[str],
+    budget: int = 10,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="CSV file for this experiment run"),
+    ] = None,
+):
     """
     Compute the fingerprint scores between all model pairs in a benchmark.
 
@@ -102,7 +111,9 @@ def scores(benchmark: str, fingerprints: list[str], budget: int = 10):
         dir=state["generated_dir"],
         batch_size=state["batch_size"],
         device=state["device"],
+        seed=state["seed"],
     )
+    scores_path = output or state["generated_dir"] / "scores.csv"
     runner.scores(
         {
             name: make_fingerprint(
@@ -111,8 +122,9 @@ def scores(benchmark: str, fingerprints: list[str], budget: int = 10):
             for name in fingerprints
         },
         budget=budget,
+        scores_path=scores_path,
     )
-    info(f"Scores saved to {(state['generated_dir'] / 'scores.csv').resolve()}")
+    info(f"Scores saved to {scores_path.resolve()}")
 
 
 @app.callback()

@@ -19,8 +19,11 @@ from .fingerprint.base import OutputRepresentation, QueriesSampler
 SCORE_COLUMNS = [
     "method",
     "budget",
+    "seed",
     "source_model",
     "target_model",
+    "is_positive",
+    "attack_type",
     "score",
     "dataset",
 ]
@@ -28,6 +31,7 @@ SCORE_KEY_COLUMNS = [
     "dataset",
     "method",
     "budget",
+    "seed",
     "source_model",
     "target_model",
 ]
@@ -54,11 +58,44 @@ class ScoresCsv:
 
     @staticmethod
     def _normalize(record: dict[str, Any]) -> dict[str, Any]:
+        source_model = str(record["source_model"])
+        target_model = str(record["target_model"])
+        seed = record.get("seed", "")
+        seed = "" if seed in (None, "") else int(seed)
+
+        default_positive = source_model == target_model or target_model.startswith(
+            source_model + "->"
+        )
+        raw_positive = record.get("is_positive", "")
+        if raw_positive in (None, ""):
+            # Backward compatibility for CSV files written before the
+            # redundant text label column was removed.
+            legacy_label = str(record.get("label", "")).strip().lower()
+            if legacy_label in ("positive", "negative"):
+                raw_positive = legacy_label == "positive"
+            else:
+                raw_positive = default_positive
+        if isinstance(raw_positive, str):
+            is_positive = raw_positive.lower() in ("1", "true", "yes")
+        else:
+            is_positive = bool(raw_positive)
+
+        if source_model == target_model:
+            default_attack = "same"
+        elif target_model.startswith(source_model + "->"):
+            variation = target_model.removeprefix(source_model + "->").split("->")[-1]
+            default_attack = variation.split("(", 1)[0]
+        else:
+            default_attack = "unrelated"
+
         return {
             "method": str(record["method"]),
             "budget": int(record["budget"]),
-            "source_model": str(record["source_model"]),
-            "target_model": str(record["target_model"]),
+            "seed": seed,
+            "source_model": source_model,
+            "target_model": target_model,
+            "is_positive": is_positive,
+            "attack_type": str(record.get("attack_type", default_attack)),
             "score": float(record["score"]),
             "dataset": str(record["dataset"]),
         }
@@ -88,12 +125,18 @@ class Experiment:
     """
 
     def __init__(
-        self, benchmark: Benchmark, dir: Path, batch_size: int, device: str
+        self,
+        benchmark: Benchmark,
+        dir: Path,
+        batch_size: int,
+        device: str,
+        seed: int | None = None,
     ) -> None:
         self.benchmark = benchmark
         self.batch_size = batch_size
         self.device = device
         self.dir = dir
+        self.seed = seed
 
     def eval_models(
         self, datasets: Iterable[str] | str | None = None, jit: bool = False
@@ -194,6 +237,7 @@ class Experiment:
         self,
         fingerprints: dict[str, tuple[QueriesSampler, OutputRepresentation]],
         budget: int,
+        scores_path: Path | None = None,
     ):
         """Run the fingerprints on the benchmark and compute the fingerprinting
         scores.
@@ -208,8 +252,9 @@ class Experiment:
         """
 
         scores: list[dict[str, Any]] = []
-        scores_csv = ScoresCsv(self.dir / "scores.csv")
-        models = {}
+        scores_csv = ScoresCsv(scores_path or self.dir / "scores.csv")
+        current_source_name: str | None = None
+        current_source_model: nn.Module | None = None
 
         for dataset_name in self.benchmark.base_models:
             dataset = self.benchmark.dataset(dataset_name)
@@ -231,11 +276,17 @@ class Experiment:
                     progress.display(f"{source_name} vs {target_name}", pos=2)
                     # print(source_name, target_name)
 
-                    source_model: nn.Module = models.setdefault(
-                        source_name, self.benchmark.torch_model(source_name)
-                    )
-                    target_model: nn.Module = models.setdefault(
-                        target_name, self.benchmark.torch_model(target_name)
+                    if source_name != current_source_name:
+                        if current_source_model is not None:
+                            current_source_model.cpu()
+                        current_source_model = self.benchmark.torch_model(source_name)
+                        current_source_name = source_name
+
+                    source_model = current_source_model
+                    target_model = (
+                        source_model
+                        if target_name == source_name
+                        else self.benchmark.torch_model(target_name)
                     )
                     source_transform = create_transform(
                         **resolve_data_config(source_model.pretrained_cfg)
@@ -329,20 +380,27 @@ class Experiment:
 
                     # Persist each pair immediately so an interrupted experiment
                     # keeps all results completed up to that point.
+                    pair_metadata = self.benchmark.pair_metadata(
+                        source_name, target_name
+                    )
                     record = dict(
                         dataset=dataset_name,
                         method=fingerprint,
                         budget=budget,
+                        seed=self.seed,
                         source_model=source_name,
                         target_model=target_name,
                         score=score,
+                        **pair_metadata,
                     )
                     scores_csv.upsert(record)
                     scores.append(record)
 
                     # Unload models from the GPU
                     source_model.cpu()
-                    target_model.cpu()
+                    if target_model is not source_model:
+                        target_model.cpu()
+                        del target_model
 
         return scores
 

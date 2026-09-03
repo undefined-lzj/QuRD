@@ -298,7 +298,7 @@ class BoundaryQueries(RandomQueries):
         ):
             image = image.clone().detach().to(self.device)
             image.requires_grad = True
-            optimizer = torch.optim.adam.Adam([image], lr=0.01)
+            optimizer = torch.optim.Adam([image], lr=0.01)
 
             # Max number of iterations is set to 1000 in IPGuard paper
             for i in range(1_000):

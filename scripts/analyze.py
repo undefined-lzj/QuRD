@@ -1,9 +1,10 @@
 from pathlib import Path
+from typing import Annotated
 
 
 import polars as pl
 import plotly.express as px
-from typer import Typer
+from typer import Option, Typer
 
 from qurd.benchmark.analysis import roc_curve, roc_metrics
 
@@ -16,24 +17,27 @@ GENERATED_DIR = Path("generated/")
 
 
 @app.command()
-def main():
-    scores = pl.read_csv(GENERATED_DIR / "scores.csv").with_columns(
-        true_value=pl.col("source_model") == pl.col("target_model")
-    )
+def main(
+    input_file: Annotated[
+        Path,
+        Option("--input", "-i", help="CSV file produced by a benchmark run"),
+    ] = GENERATED_DIR / "scores.csv",
+):
+    scores = pl.read_csv(input_file)
     metrics = roc_metrics(
         scores,
-        ["dataset", "method", "budget", "source_model"],
+        ["dataset", "method", "budget", "seed", "source_model"],
         score=1 - pl.col("score"),
-        true_value=pl.col("source_model") == pl.col("target_model"),
+        true_value=pl.col("is_positive"),
         fpr_threshold=0.05,
     )
     print(metrics)
 
     roc = roc_curve(
         scores,
-        ["dataset", "method", "budget", "source_model"],
+        ["dataset", "method", "budget", "seed", "source_model"],
         score=1 - pl.col("score"),
-        true_value=pl.col("source_model") == pl.col("target_model"),
+        true_value=pl.col("is_positive"),
     )
 
     print(roc)

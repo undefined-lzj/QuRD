@@ -61,7 +61,12 @@ class SACBenchmark(Benchmark):
     # fmt: on
 
     def pairs(self, dataset: str | None = None) -> Iterable[tuple[str, str]]:
-        raise NotImplementedError()
+        if dataset is None:
+            dataset = "CIFAR10"
+
+        for source_model in self.base_models[dataset]:
+            for target_model in self.list_models(dataset):
+                yield source_model, target_model
 
     def list_models(self, dataset: str = "CIFAR10") -> Iterator[str]:
         for base_model_name in self.base_models[dataset]:

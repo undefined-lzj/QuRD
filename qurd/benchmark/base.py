@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from abc import ABC, abstractmethod
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 from torch import nn
 from torch.utils.data import Dataset
@@ -80,6 +80,29 @@ class Benchmark(ABC):
     @property
     def datasets(self) -> list[str]:
         return list(self.base_models.keys())
+
+    def pair_metadata(
+        self, source_model: str, target_model: str
+    ) -> dict[str, Any]:
+        """Describe the ground-truth relation for a benchmark model pair."""
+        if source_model == target_model:
+            return {
+                "is_positive": True,
+                "attack_type": "same",
+            }
+
+        derived_prefix = source_model + "->"
+        if target_model.startswith(derived_prefix):
+            variation = target_model.removeprefix(derived_prefix).split("->")[-1]
+            return {
+                "is_positive": True,
+                "attack_type": variation.split("(", 1)[0],
+            }
+
+        return {
+            "is_positive": False,
+            "attack_type": "unrelated",
+        }
 
     @abstractmethod
     def list_models(self, dataset: str = "CIFAR10") -> Iterable[str]:
