@@ -266,8 +266,13 @@ class BoundaryQueries(RandomQueries):
 
         # The labels predicted by the source model (the i in equation (5))
         predicted_labels = logits.argmax(-1)
-        # The target labels (j in the equation (5))
-        target_labels = torch.randint_like(predicted_labels, low=0, high=n_classes)
+        # The target labels (j in equation (5)) must differ from the source
+        # labels (i). Sampling a non-zero cyclic offset is uniform over the
+        # other n_classes - 1 labels.
+        target_offsets = torch.randint_like(
+            predicted_labels, low=1, high=n_classes
+        )
+        target_labels = (predicted_labels + target_offsets) % n_classes
 
         def boundary_loss(logits: torch.Tensor, source_labels, target_labels, k):
             (n_classes,) = logits.shape
@@ -280,9 +285,8 @@ class BoundaryQueries(RandomQueries):
 
             Z_i = torch.dot(source_encoding, logits)
             Z_j = torch.dot(target_encoding, logits)
-            max_Z_t = torch.max(
-                (1 - target_encoding) * (1 - source_encoding) * logits, -1
-            ).values
+            excluded = (target_encoding + source_encoding).bool()
+            max_Z_t = logits.masked_fill(excluded, -torch.inf).max()
 
             return F.relu(Z_i - Z_j + k) + F.relu(max_Z_t - Z_i)
 
@@ -297,6 +301,8 @@ class BoundaryQueries(RandomQueries):
             images, predicted_labels, target_labels
         ):
             image = image.clone().detach().to(self.device)
+            predicted_label = predicted_label.to(self.device)
+            target_label = target_label.to(self.device)
             image.requires_grad = True
             optimizer = torch.optim.Adam([image], lr=0.01)
 
@@ -305,12 +311,15 @@ class BoundaryQueries(RandomQueries):
                 pred = source_model(source_transform(image).unsqueeze(0)).squeeze()
                 cost = boundary_loss(pred, predicted_label, target_label, self.k)
 
+                # IPGuard stops only when the complete objective reaches zero,
+                # which enforces both the target margin k and dominance over
+                # every class other than i and j.
+                if cost.detach().item() <= 1e-6:
+                    break
+
                 cost.backward()
                 optimizer.step()
                 optimizer.zero_grad()
-
-                if pred.argmax(-1) == target_label:
-                    break
 
             generated_images.append(image.detach().cpu().unsqueeze(0))
 

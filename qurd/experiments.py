@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from .benchmark.base import Benchmark
 from .fingerprint.base import OutputRepresentation, QueriesSampler
+from .fingerprint.utils import split_transform
 
 
 SCORE_COLUMNS = [
@@ -303,11 +304,11 @@ class Experiment:
                     target_model = target_model.to(target_device)
                     # print(f"{source_device = }, {target_device = }")
 
-                    # Set the transform of the dataset to be that of the
-                    # source_model
-                    #
-                    # TODO: normalize the source/target model names before saving
-                    dataset.transform = source_transform
+                    # Query samplers must receive image-domain tensors. Keep
+                    # resizing/cropping on the dataset, but leave normalization
+                    # to the sampler/model evaluation path so it is applied once.
+                    query_transform, _ = split_transform(source_transform)
+                    dataset.transform = query_transform
 
                     # Compute the queries
                     queries_path: Path = (
