@@ -15,6 +15,15 @@ from tqdm import tqdm
 from .benchmark.base import Benchmark
 from .fingerprint.base import OutputRepresentation, QueriesSampler
 from .fingerprint.utils import split_transform
+from .fixed_hybrid import (
+    FIXED_HYBRID_METHOD,
+    FixedHybridScoresCsv,
+    ensure_cache_manifest,
+    file_sha256,
+    fixed_hybrid_cache_dir,
+    make_fixed_hybrid_queries,
+    score_fixed_hybrid_labels,
+)
 
 
 SCORE_COLUMNS = [
@@ -404,6 +413,254 @@ class Experiment:
                         del target_model
 
         return scores
+
+    def fixed_hybrid_scores(
+        self,
+        budget: int,
+        akh_budgets: Iterable[int],
+        scores_path: Path,
+        baseline_cache_dir: Path,
+    ) -> list[dict[str, Any]]:
+        """Evaluate fixed AKH/IPGuard query mixtures using hard-label distance.
+
+        The component queries are fixed prefixes of the existing AKH and
+        IPGuard baseline query pools. Query construction uses no target-model
+        information. Every active cache path and manifest records the seed,
+        method, total budget, and mixture ratio.
+        """
+        from .fingerprint.queries import BoundaryQueries, RandomNegativeQueries
+        from .fingerprint.representation import HardLabels
+
+        akh_budgets = tuple(akh_budgets)
+        if budget <= 0:
+            raise ValueError("budget must be positive")
+        if any(value < 0 or value > budget for value in akh_budgets):
+            raise ValueError("Each AKH budget must be between zero and budget")
+        if len(set(akh_budgets)) != len(akh_budgets):
+            raise ValueError("AKH budgets must be unique")
+        if self.seed is None:
+            raise ValueError("Fixed-Hybrid requires an explicit seed")
+
+        writer = FixedHybridScoresCsv(scores_path)
+        records: list[dict[str, Any]] = []
+        representation = HardLabels(batch_size=self.batch_size, device=self.device)
+        akh_sampler = RandomNegativeQueries(
+            augment=True, device=self.device, batch_size=self.batch_size
+        )
+        ipguard_sampler = BoundaryQueries(
+            batch_size=self.batch_size, device=self.device
+        )
+
+        for dataset_name in self.benchmark.base_models:
+            dataset = self.benchmark.dataset(dataset_name)
+            pairs = list(self.benchmark.pairs(dataset_name))
+            progress = tqdm(
+                pairs,
+                total=len(pairs),
+                desc=f"{dataset_name}: {FIXED_HYBRID_METHOD}",
+                position=1,
+            )
+
+            current_source_name: str | None = None
+            current_source_model: nn.Module | None = None
+            query_sets: dict[int, tuple[torch.Tensor, torch.Tensor, Path]] = {}
+
+            for source_name, target_name in progress:
+                progress.display(f"{source_name} vs {target_name}", pos=2)
+
+                if source_name != current_source_name:
+                    if current_source_model is not None:
+                        current_source_model.cpu()
+                    current_source_model = self.benchmark.torch_model(source_name)
+                    current_source_name = source_name
+                    source_device = (
+                        "cpu" if "quantize" in source_name else self.device
+                    )
+                    current_source_model = current_source_model.to(source_device)
+                    source_transform = create_transform(
+                        **resolve_data_config(current_source_model.pretrained_cfg)
+                    )
+                    query_transform, _ = split_transform(source_transform)
+                    dataset.transform = query_transform
+
+                    akh_pool_path = (
+                        baseline_cache_dir
+                        / self.benchmark.__class__.__name__
+                        / dataset_name
+                        / f"{akh_sampler}-{budget}"
+                        / f"{source_name}.pickle"
+                    )
+                    ipguard_pool_path = (
+                        baseline_cache_dir
+                        / self.benchmark.__class__.__name__
+                        / dataset_name
+                        / f"{ipguard_sampler}-{budget}"
+                        / f"{source_name}.pickle"
+                    )
+                    if not akh_pool_path.is_file() or not ipguard_pool_path.is_file():
+                        raise FileNotFoundError(
+                            "Fixed-Hybrid requires the completed AKH and IPGuard "
+                            f"budget={budget} baseline query caches for {source_name}"
+                        )
+                    akh_pool: torch.Tensor = _load(akh_pool_path)
+                    ipguard_pool: torch.Tensor = _load(ipguard_pool_path)
+                    if len(akh_pool) != budget or len(ipguard_pool) != budget:
+                        raise ValueError(
+                            "Baseline query pools must each contain exactly "
+                            f"{budget} queries"
+                        )
+
+                    akh_pool_hash = file_sha256(akh_pool_path)
+                    ipguard_pool_hash = file_sha256(ipguard_pool_path)
+                    query_sets = {}
+                    for akh_budget in akh_budgets:
+                        ipguard_budget = budget - akh_budget
+                        cache_dir = fixed_hybrid_cache_dir(
+                            self.dir,
+                            self.benchmark.__class__.__name__,
+                            dataset_name,
+                            self.seed,
+                            budget,
+                            akh_budget,
+                            ipguard_budget,
+                            source_name,
+                        )
+                        query_path = cache_dir / "queries.pickle"
+                        manifest_path = cache_dir / "manifest.json"
+                        if query_path.is_file() and not manifest_path.is_file():
+                            raise ValueError(
+                                f"Refusing unidentifiable cache without manifest: {query_path}"
+                            )
+                        manifest = {
+                            "method": FIXED_HYBRID_METHOD,
+                            "benchmark": self.benchmark.__class__.__name__,
+                            "dataset": dataset_name,
+                            "seed": self.seed,
+                            "budget": budget,
+                            "akh_budget": akh_budget,
+                            "ipguard_budget": ipguard_budget,
+                            "akh_ratio": akh_budget / budget,
+                            "source_model": source_name,
+                            "query_selection": "fixed_prefix_from_completed_baseline_pools",
+                            "target_model_used_for_queries": False,
+                            "akh_pool_path": str(akh_pool_path.resolve()),
+                            "akh_pool_sha256": akh_pool_hash,
+                            "ipguard_pool_path": str(ipguard_pool_path.resolve()),
+                            "ipguard_pool_sha256": ipguard_pool_hash,
+                        }
+                        ensure_cache_manifest(manifest_path, manifest)
+                        expected_queries = make_fixed_hybrid_queries(
+                            akh_pool,
+                            ipguard_pool,
+                            akh_budget,
+                            ipguard_budget,
+                        )
+                        queries = _load_or_compute(
+                            lambda q=expected_queries: q,
+                            query_path,
+                        )
+                        if len(queries) != budget or not torch.equal(
+                            queries, expected_queries
+                        ):
+                            raise ValueError(
+                                "Hybrid query cache differs from its fixed baseline prefixes"
+                            )
+                        representation.device = source_device
+                        source_labels_path = (
+                            cache_dir / str(representation) / "source.pickle"
+                        )
+                        source_labels = _load_or_compute(
+                            lambda q=queries: representation(
+                                queries=q,
+                                model=current_source_model,
+                                transform=source_transform,
+                            ),
+                            source_labels_path,
+                        )
+                        query_sets[akh_budget] = (
+                            queries,
+                            source_labels,
+                            cache_dir,
+                        )
+
+                source_model = current_source_model
+                if source_model is None:
+                    raise RuntimeError("Source model was not initialized")
+                source_transform = create_transform(
+                    **resolve_data_config(source_model.pretrained_cfg)
+                )
+                target_model = (
+                    source_model
+                    if target_name == source_name
+                    else self.benchmark.torch_model(target_name)
+                )
+                target_device = "cpu" if "quantize" in target_name else self.device
+                target_model = target_model.to(target_device)
+                target_transform = create_transform(
+                    **resolve_data_config(target_model.pretrained_cfg)
+                )
+
+                for akh_budget in akh_budgets:
+                    ipguard_budget = budget - akh_budget
+                    queries, source_labels, cache_dir = query_sets[akh_budget]
+                    if target_model is source_model:
+                        target_labels = source_labels
+                    else:
+                        representation.device = target_device
+                        target_labels_path = (
+                            cache_dir
+                            / str(representation)
+                            / "targets"
+                            / f"{target_name}.pickle"
+                        )
+                        target_labels = _load_or_compute(
+                            lambda q=queries: representation(
+                                queries=q,
+                                model=target_model,
+                                transform=target_transform,
+                            ),
+                            target_labels_path,
+                        )
+
+                    hybrid_score, akh_score, ipguard_score = (
+                        score_fixed_hybrid_labels(
+                            source_labels,
+                            target_labels,
+                            akh_budget,
+                            ipguard_budget,
+                        )
+                    )
+                    pair_metadata = self.benchmark.pair_metadata(
+                        source_name, target_name
+                    )
+                    record = {
+                        "method": FIXED_HYBRID_METHOD,
+                        "budget": budget,
+                        "seed": self.seed,
+                        "source_model": source_name,
+                        "target_model": target_name,
+                        "score": hybrid_score,
+                        "dataset": dataset_name,
+                        "pair_label": int(pair_metadata["is_positive"]),
+                        "attack_type": pair_metadata["attack_type"],
+                        "akh_budget": akh_budget,
+                        "ipguard_budget": ipguard_budget,
+                        "akh_ratio": akh_budget / budget,
+                        "akh_score": akh_score,
+                        "ipguard_score": ipguard_score,
+                        "hybrid_score": hybrid_score,
+                    }
+                    writer.upsert(record)
+                    records.append(record)
+
+                if target_model is not source_model:
+                    target_model.cpu()
+                    del target_model
+
+            if current_source_model is not None:
+                current_source_model.cpu()
+
+        return records
 
 
 T = TypeVar("T")

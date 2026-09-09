@@ -127,6 +127,55 @@ def scores(
     info(f"Scores saved to {scores_path.resolve()}")
 
 
+@app.command("fixed-hybrid")
+def fixed_hybrid(
+    benchmark: str,
+    budget: int = 20,
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            "-o",
+            help="CSV containing all five Fixed-Hybrid ratios",
+        ),
+    ] = Path("generated/results/phase3_fixed_hybrid_cifar10_b20_s123456789.csv"),
+    baseline_cache_dir: Annotated[
+        Path,
+        typer.Option(
+            "--baseline-cache-dir",
+            help="Cache root containing the completed AKH/IPGuard baseline queries",
+        ),
+    ] = Path("generated"),
+):
+    """Run the fixed AKH/IPGuard mixtures for Phase 3."""
+    if benchmark != "SACBenchmark":
+        raise typer.BadParameter("Phase 3 Fixed-Hybrid requires SACBenchmark")
+    if budget != 20:
+        raise typer.BadParameter("The first Fixed-Hybrid round requires budget=20")
+    if state["seed"] != 123456789:
+        raise typer.BadParameter(
+            "The first Fixed-Hybrid round requires seed=123456789"
+        )
+
+    bench = get_benchmark(
+        benchmark, state["data_dir"], state["models_dir"], state["device"]
+    )
+    runner = Experiment(
+        bench,
+        dir=state["generated_dir"],
+        batch_size=state["batch_size"],
+        device=state["device"],
+        seed=state["seed"],
+    )
+    runner.fixed_hybrid_scores(
+        budget=budget,
+        akh_budgets=(0, 5, 10, 15, 20),
+        scores_path=output,
+        baseline_cache_dir=baseline_cache_dir,
+    )
+    info(f"Fixed-Hybrid scores saved to {output.resolve()}")
+
+
 @app.callback()
 def main(
     data_dir: Annotated[Path, typer.Option(envvar="DATA_DIR")] = DEFAULT_DATA_DIR,
